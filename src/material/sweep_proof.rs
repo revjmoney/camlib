@@ -19,8 +19,14 @@
 //!   is shrunk radially by a and lifted by a. Each point of the real tool is
 //!   within k·a of that eroded tool: k = √2 where the section is flat out
 //!   to r0 >= a (move the point a inward and a up), and √(1 + (1 + rise)²)
-//!   near a pointed tip. Ball and bull ends are replaced by their enclosing
-//!   flat end (a superset: sound, only conservative).
+//!   near a pointed tip.
+//! - A ball or bull-nose end (radius R, corner rc >= a) is proven with its
+//!   real shape: eroded by a it is the bull of radius R - a and corner
+//!   rc - a lifted by a (the corner's tube and the flat both shrink by a
+//!   about the same centres), and every point of the real end is within a
+//!   of it (k = 1: the end's boundary is a union of a-balls). Its contact
+//!   is `Index::bull_chord_bound_clear`. A corner smaller than a is replaced
+//!   by the enclosing flat end (a superset: sound, only conservative).
 //! - With k·a < τ - e, an eroded tool proven clear of M along the move
 //!   (`Index::sections_chord_clear`: contact against every triangle, the
 //!   gap bounded by concavity) proves the claim. A swept point q deeper
@@ -65,6 +71,9 @@ struct ToolProof {
     /// The eroded sections and the erosion a.
     sections: Vec<Section>,
     erosion: f64,
+    /// The eroded ball or bull-nose end (radius, corner), proven with its
+    /// real shape; `sections` then holds the rest of the assembly.
+    end: Option<[f64; 2]>,
     /// The real assembly's largest radius (unproven footprints).
     reach: f64,
 }
@@ -308,7 +317,23 @@ impl SweepProof {
                     })
                     .fold(std::f64::consts::SQRT_2, f64::max);
                 let a = self.budget / k;
-                let sections = sections
+                let c = tool.cutter().definition();
+                let radius = c.diameter_mm / 2.;
+                let corner = match c.shape {
+                    crate::tool::CutterShape::Ball => Some(radius),
+                    crate::tool::CutterShape::Bull { corner_radius_mm } => Some(corner_radius_mm),
+                    _ => None,
+                };
+                // `enclosing_sections` puts the cutter's end first.
+                let end = corner
+                    .filter(|rc| *rc >= a && radius > a)
+                    .map(|rc| [radius - a, rc - a]);
+                let rest = if end.is_some() {
+                    &sections[1..]
+                } else {
+                    &sections[..]
+                };
+                let sections = rest
                     .iter()
                     .filter(|s| s.r1 > a)
                     .map(|s| Section {
@@ -318,11 +343,13 @@ impl SweepProof {
                         rise: s.rise,
                     })
                     .collect::<Vec<_>>();
-                (!sections.is_empty() && sections.iter().all(Section::valid)).then_some(ToolProof {
-                    sections,
-                    erosion: a,
-                    reach,
-                })
+                ((end.is_some() || !sections.is_empty()) && sections.iter().all(Section::valid))
+                    .then_some(ToolProof {
+                        sections,
+                        erosion: a,
+                        end,
+                        reach,
+                    })
             }
         };
         self.tools.insert(id.clone(), proof);
@@ -413,10 +440,23 @@ impl SweepProof {
             // The eroded tool is lifted by a; any extra lift is a required
             // clearance for sub-arc deviation out of the XY plane.
             match geometry {
-                Geometry::Mesh(index) => {
-                    Ok(index.sections_chord_clear(p, q, &sections, lift - a, seen, stamp))
-                }
+                Geometry::Mesh(index) => Ok((sections.is_empty()
+                    || index.sections_chord_clear(p, q, &sections, lift - a, seen, stamp))
+                    && proof.end.is_none_or(|[r, rc]| {
+                        index.bull_chord_bound_clear(p, q, r + grow, rc, lift - a, seen, stamp)
+                    })),
                 Geometry::Prism { region, floor, top } => {
+                    // The prism is proven against the end's enclosing flat
+                    // (its full radius at its tip), as before.
+                    let mut sections = sections;
+                    if let Some([r, _]) = proof.end {
+                        sections.push(Section {
+                            z0: 0.,
+                            r0: r + grow,
+                            r1: r + grow,
+                            rise: 0.,
+                        });
+                    }
                     // The eroded tool's lowest point along the chord.
                     let tip = p[2].min(q[2]) + a - lift;
                     if let Some(f) = floor
@@ -813,6 +853,141 @@ mod tests {
                 line([-5., -5., 10.05], [25., -5., 10.05])
             ));
         }
+    }
+
+    #[test]
+    fn ball_and_bull_ends_are_proven_with_their_real_shape() {
+        // #107: a ball (radius 3) and a bull nose (radius 3, corner 1) run
+        // along the box's top edge (x = 0, z = 10) with the tip below the
+        // top. The real end clears the edge from axis offset h* on; the
+        // enclosing flat end (radius 3) would cut it at every h < 3, which
+        // is what the proof used before.
+        let ball = tool(CutterShape::Ball).prepare().unwrap();
+        let bull = tool(CutterShape::Bull {
+            corner_radius_mm: 1.,
+        })
+        .prepare()
+        .unwrap();
+        let (tolerance, error) = (0.005, 0.0005);
+        // Ball, tip at Z 9: centre Z 12, clear iff h^2 + 2^2 >= 3^2.
+        // Bull, tip at Z 9.5: tube centre radius 2 at Z 10.5, clear iff
+        // (h - 2)^2 + 0.5^2 >= 1.
+        let cases = [(&ball, 9., 5f64.sqrt()), (&bull, 9.5, 2. + 0.75f64.sqrt())];
+        for (t, tip, tangent) in cases {
+            for (offset, expect) in [(0.06, true), (0.02, true), (-0.03, false), (-0.2, false)] {
+                let h = tangent + offset;
+                let mut p = proof(tolerance, error, true);
+                let curve = line([-h, -5., tip], [-h, 25., tip]);
+                let proven = proves(&mut p, t, curve.clone());
+                assert_eq!(proven, expect, "tip {tip} offset {offset}");
+                let depth = deepest(t, &curve);
+                if proven {
+                    assert!(depth <= tolerance - error, "proven at depth {depth}");
+                }
+                // The enclosing flat end of the same radius cuts the edge.
+                assert!(h < 3.);
+            }
+        }
+        // A ball-end pass tangent to the floor (the top face) is proven at
+        // the same tolerances as a flat-end pass.
+        let flat = tool(CutterShape::Flat).prepare().unwrap();
+        for (tolerance, error) in [(0.005, 0.0005), (0.001, 0.00088)] {
+            for t in [&flat, &ball, &bull] {
+                let mut p = proof(tolerance, error, true);
+                assert!(proves(&mut p, t, line([4., 2., 10.], [16., 18., 10.])));
+                assert!(!proves(&mut p, t, line([4., 2., 9.99], [16., 18., 9.99])));
+            }
+        }
+    }
+
+    #[test]
+    fn proven_curved_end_moves_never_penetrate_deeper_than_the_tolerance() {
+        // Random lines, arcs and helices rolling ball and bull ends over the
+        // box's top edges and along its walls; every proven move is checked
+        // against the oracle (the tool's own radius profile, sampled).
+        let tools = [
+            tool(CutterShape::Ball),
+            tool(CutterShape::Bull {
+                corner_radius_mm: 1.,
+            }),
+            tool(CutterShape::Bull {
+                corner_radius_mm: 2.5,
+            }),
+        ]
+        .map(|t| t.prepare().unwrap());
+        let (tolerance, error) = (0.005, 0.0005);
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut proven, mut refused) = (0, 0);
+        for i in 0..90 {
+            let t = &tools[(i / 3) % 3];
+            let mut p = proof(tolerance, error, true);
+            // Over the top edge (tip 0 to 2 mm below the top, axis 1.8 to
+            // 3.1 mm out), or along a wall well below the top.
+            let (h, z) = if i % 2 == 0 {
+                (1.8 + 1.3 * rand(), 8. + 2. * rand())
+            } else {
+                (3. + (rand() - 0.5) * 0.04, 2. + 5. * rand())
+            };
+            let x = if i % 4 < 2 { -h } else { 20. + h };
+            let curve = match i % 3 {
+                0 => line(
+                    [x, -4. + 8. * rand(), z],
+                    [x, 16. + 8. * rand(), z + (rand() - 0.5) * 0.02],
+                ),
+                1 => {
+                    // An XY arc tangent to the edge line at its middle.
+                    let r = 4. + 2. * rand();
+                    let (cx, a0) = if x < 0. {
+                        (x - r, -0.6f64)
+                    } else {
+                        (x + r, std::f64::consts::PI - 0.6)
+                    };
+                    let center = [cx, 10., z];
+                    let sweep = 1.2;
+                    let at = |a: f64| [cx + r * a.cos(), 10. + r * a.sin(), z];
+                    Curve::Arc {
+                        start: at(a0),
+                        end: at(a0 + sweep),
+                        center,
+                        plane: Plane::Xy,
+                        sweep_rad: sweep,
+                    }
+                }
+                _ => {
+                    let r = 1.5;
+                    let cx = if x < 0. { x - r } else { x + r };
+                    let a0: f64 = if x < 0. { 0. } else { std::f64::consts::PI };
+                    let start = [cx + r * a0.cos(), 10. + r * a0.sin(), z];
+                    Curve::Helix {
+                        start,
+                        end: [start[0], start[1], z - 0.5],
+                        center: [cx, 10., z],
+                        plane: Plane::Xy,
+                        sweep_rad: std::f64::consts::TAU,
+                    }
+                }
+            };
+            if proves(&mut p, t, curve.clone()) {
+                proven += 1;
+                let depth = deepest(t, &curve);
+                assert!(
+                    depth <= tolerance - error,
+                    "move {i}: proven, oracle depth {depth}"
+                );
+            } else {
+                refused += 1;
+            }
+        }
+        assert!(
+            proven > 20 && refused > 10,
+            "proven {proven}, refused {refused}"
+        );
     }
 
     /// A 40 x 30 pocket to a floor at Z 6 in stock to Z 10 (prismatic
