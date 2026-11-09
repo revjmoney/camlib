@@ -527,6 +527,14 @@ impl Tri {
         floor: f64,
         bound: bool,
     ) -> Option<f64> {
+        if bound && self.p[0][2] == self.p[1][2] && self.p[1][2] == self.p[2][2] {
+            // A level facet: the objective is its height less the profile of
+            // the distance, which does not decrease outward, so the maximum
+            // is at the least horizontal distance (exact, no search). Fine
+            // flat floors are most of what a tangent pass reaches.
+            let d = self.distance_xy(p);
+            return (d <= r).then(|| self.p[0][2] - bull_profile(d, r, rc));
+        }
         let mut best: Option<f64> = None;
         fn take(best: &mut Option<f64>, z: f64) {
             *best = Some(best.map_or(z, |b| b.max(z)));
@@ -936,6 +944,7 @@ impl Index {
             return false;
         }
         let low = a[2].min(b[2]);
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
         let at = |t: f64| [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
         let tip = |t: f64| a[2] + t * (b[2] - a[2]);
         let mut clear = true;
@@ -954,7 +963,21 @@ impl Index {
             }
             let dist = |u: f64| t.distance_xy(at(u));
             let near = golden_argmin(dist, 0., 1., 60);
-            if dist(near) > r {
+            let closest = dist(near);
+            if closest > r {
+                return true;
+            }
+            // No contact along the chord is higher than the triangle's top
+            // less the profile at the least horizontal distance (the profile
+            // does not decrease outward). The distance is convex along the
+            // chord, so its minimum lies in the final golden bracket around
+            // `near`; the distance is 1-Lipschitz, so it is at least
+            // `closest` less the chord's length times that bracket (bounded
+            // generously here). Most triangles of a fine mesh that a
+            // tangent pass reaches are dismissed by this alone, without the
+            // contact search.
+            let least = (closest - 1e-9 * (1. + length)).max(0.);
+            if t.max[2] - bull_profile(least, r, rc) + lift <= low {
                 return true;
             }
             let edge = |inside: f64, outside: f64| {
