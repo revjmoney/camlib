@@ -41,7 +41,6 @@ is ordered by real dependency, not by size:
 
 Smaller, independent items first, then the 3D stock and what needs it.
 
-- [ ] #12 Geodesic finishing
 - [ ] #7 Probing: work offset, feature and tool-setting cycles (3-axis; tilted planes come with #5)
 - [ ] #92 Deburr: ball-end and bull-nose tools
 - [ ] #93 Deburr: edges next to drafted or filleted walls
@@ -106,6 +105,7 @@ use: 2D, holes, 3D), turning and thermal.
 - [ ] #43 Optimize Morph and flow finishing
 - [ ] #44 Optimize Scallop finishing
 - [ ] #45 Optimize Pencil finishing
+- [ ] #118 Optimize Geodesic finishing
 - [ ] #49 Optimize turning: facing (TurnFace)
 - [ ] #50 Optimize turning: roughing (TurnRough)
 - [ ] #51 Optimize turning: finishing (TurnFinish) (after #14)
@@ -148,3 +148,5 @@ These can run in parallel with any phase.
 - [x] #101 Turning: a face groove as wide as the face-grooving blade fails with 'line must have nonzero length'
 - [x] #102 Turning: an inside groove after facing fails with 'needs an open hole in front of it'
 - [x] #103 Turning: tools need an insert thickness and out-of-plane holder bodies
+- [x] #12 Geodesic finishing
+- [x] #119 Geodesic finishing: tool-centre mode (spacing on the radius-offset surface)

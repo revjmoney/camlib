@@ -9,10 +9,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod geodesic;
 mod patterns;
 mod pencil;
 mod scallop;
-pub use patterns::FinishPattern;
+pub use patterns::{FinishPattern, GeodesicSeed};
 /// One XY polyline of a scan pattern.
 type Pass = Vec<[f64; 2]>;
 
@@ -389,6 +390,9 @@ pub struct ParallelReport {
     pub work: SurfaceWork,
     pub clearance_proof: &'static str,
     pub surface_completion: &'static str,
+    /// Geodesic passes: the measured spacing and scallop (#12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geodesic: Option<geodesic::GeodesicReport>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -670,9 +674,11 @@ impl ParallelPlan {
                             && op.rest_threshold_mm.is_none()
                             && !matches!(
                                 op.pattern,
-                                FinishPattern::Pencil { .. } | FinishPattern::Scallop
+                                FinishPattern::Pencil { .. }
+                                    | FinishPattern::Scallop
+                                    | FinishPattern::Geodesic { .. }
                             )),
-                    "slope limits, rest finishing, pencil and scallop passes need a ball end mill (a flat end mill has no single contact normal)".into(),
+                    "slope limits, rest finishing, pencil, scallop and geodesic passes need a ball end mill (a flat end mill has no single contact normal)".into(),
                 ),
                 (
                     values.iter().all(|x| x.is_finite()),
@@ -727,6 +733,7 @@ impl ParallelPlan {
                     FinishPattern::Raster
                         | FinishPattern::Spiral { .. }
                         | FinishPattern::Scallop
+                        | FinishPattern::Geodesic { .. }
                         | FinishPattern::Morph { .. }
                 ) {
                     (
@@ -821,7 +828,7 @@ impl ParallelPlan {
         if surface.max_z() > spec.max_mm[2] + coordinate_guard {
             return Err("surface target exceeds initial stock top".into());
         }
-        let limits = slope_limits("parallel finishing", op.slope_from_deg, op.slope_to_deg)?;
+        let mut limits = slope_limits("parallel finishing", op.slope_from_deg, op.slope_to_deg)?;
         let (mut passes, spoke_pitch) = Self::passes(&op, spec, radius)?;
         let axis = if op.axis == TraverseAxis::X { 0 } else { 1 };
         let cross = 1 - axis;
@@ -840,7 +847,9 @@ impl ParallelPlan {
             FinishPattern::Radial { .. } => (passes.len(), spoke_pitch),
             FinishPattern::Project { .. } | FinishPattern::Pencil { .. } => (passes.len(), 0.),
             FinishPattern::Morph { .. } => (passes.len(), op.stepover_mm),
-            FinishPattern::Scallop => (passes.len(), op.stepover_mm),
+            FinishPattern::Scallop | FinishPattern::Geodesic { .. } => {
+                (passes.len(), op.stepover_mm)
+            }
         };
         let inflated =
             radius + op.stock_to_leave_mm + op.surface.surface_error_mm + op.safety_margin_mm;
@@ -885,6 +894,26 @@ impl ParallelPlan {
                 &mut slope_work,
                 cancel,
             )?;
+        }
+        let mut geodesic_report = None;
+        if let FinishPattern::Geodesic { seed, tool_centre } = &op.pattern {
+            // Geodesic plans inside its slope range (the drive surface is
+            // the faces within it): its passes are not cut afterwards.
+            let (found, report) = geodesic::passes(
+                mesh,
+                &surface,
+                op.stepover_mm,
+                inflated,
+                radius + op.stock_to_leave_mm,
+                op.path_error_mm,
+                seed,
+                *tool_centre,
+                limits.take(),
+                &mut slope_work,
+                cancel,
+            )?;
+            passes = found;
+            geodesic_report = Some(report);
         }
         if let FinishPattern::Pencil {
             min_angle_deg,
@@ -1017,7 +1046,7 @@ impl ParallelPlan {
             passes.len()
         } else if matches!(
             op.pattern,
-            FinishPattern::Pencil { .. } | FinishPattern::Scallop
+            FinishPattern::Pencil { .. } | FinishPattern::Scallop | FinishPattern::Geodesic { .. }
         ) {
             if passes.is_empty() {
                 return Err(match op.pattern {
@@ -1080,6 +1109,7 @@ impl ParallelPlan {
             work: slope_work,
             clearance_proof: "continuous segment distance to downward-extruded triangles and base; inflated analytic ball contact; shank/holder above initial stock",
             surface_completion: "not_certified; path excess is bounded, whole-target scallop/unreachable regions require independent stock checks",
+            geodesic: geodesic_report,
         };
         let heights = crate::heights::Heights::resolve(
             op.clearance_z_mm,
@@ -1201,7 +1231,10 @@ impl ParallelPlan {
         let mut spoke_pitch = 0.;
         let passes = match &op.pattern {
             // Pencil passes need the prepared surface: found in prepare.
-            FinishPattern::Raster | FinishPattern::Pencil { .. } | FinishPattern::Scallop => vec![],
+            FinishPattern::Raster
+            | FinishPattern::Pencil { .. }
+            | FinishPattern::Scallop
+            | FinishPattern::Geodesic { .. } => vec![],
             &FinishPattern::Spiral {
                 center_mm,
                 inner_radius_mm,
@@ -1543,6 +1576,12 @@ impl ParallelPlan {
         let mut end = first.b;
         let mut compacted = 0;
         let mut prepared = None;
+        // The vertices a merge drops: each must lie on the merged chord in
+        // XY (within the tolerance), so merging removes only collinear
+        // points (subdivision midpoints, straight runs) and never moves the
+        // planned path sideways. The height certificate below bounds only
+        // the vertical error, so on a flat face it would accept any chord.
+        let mut dropped: Vec<Vec3> = vec![];
         // Greedy bounded lookahead removes subdivision artifacts only after
         // proving the replacement against the original protected solid and
         // original contact graph. No endpoint-only path simplification.
@@ -1567,6 +1606,13 @@ impl ParallelPlan {
             stack = candidate;
             cursor = candidate_cursor;
             if next_error.is_none() {
+                break;
+            }
+            dropped.push(end);
+            if dropped
+                .iter()
+                .any(|q| xy_off_chord(*q, first.a, next.b) > self.op.tolerance_mm)
+            {
                 break;
             }
             let (_, bound) = self.mid_excess(first.a, next.b, &mut work, cancel)?;
@@ -1881,4 +1927,16 @@ impl ParallelPlan {
             }
         }
     }
+}
+
+/// The XY distance of `q` from the chord `a`-`b`.
+fn xy_off_chord(q: Vec3, a: Vec3, b: Vec3) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let ll = dx * dx + dy * dy;
+    let t = if ll > 0. {
+        (((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / ll).clamp(0., 1.)
+    } else {
+        0.
+    };
+    (q[0] - a[0] - t * dx).hypot(q[1] - a[1] - t * dy)
 }

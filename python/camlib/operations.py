@@ -249,6 +249,92 @@ class Scallop:
 
 
 @dataclass(frozen=True)
+class Geodesic:
+    """Ball-end geodesic finishing (#12): passes at a constant stepover
+    measured along the part's surface from ``seed``, so the scallop stays
+    even on steep and shallow areas. ``seed``: ``"boundary"`` (passes work
+    inward from the drive surface's boundary), ``("point", (x, y))`` (rings
+    around a point, the first half a stepover out) or
+    ``("curve", ((x, y), ...))`` (the curve itself is the first pass; the
+    others follow it along the surface).
+
+    The passes are exact iso-curves of the geodesic distance, every point is
+    certified within half a stepover (plus the path error) of a pass, and
+    the spacing between neighbouring passes is measured independently from
+    fresh ball contacts; all in the operation report (``geodesic``). Every
+    chord is lifted onto the surface and checked like Parallel.
+
+    ``mode``: ``"contact"`` (default: the stepover measured along the part's
+    surface) or ``"tool_centre"`` (measured along the surface the ball's
+    centre moves on: smooth through internal corners and wall tops, but the
+    contact spacing then varies with the curvature; both spacings are
+    measured and reported).
+
+    ``slope_to_deg`` defaults to 80 here: steeper faces (where the ball would
+    touch near its equator and chatter along a wall) are left to Waterline.
+    The passes are planned within the slope range."""
+
+    id: str
+    tool: object
+    surface: object
+    floor_z_mm: float
+    stepover_mm: float
+    clearance_z_mm: float
+    seed: object
+    stock_to_leave_mm: float = 0
+    path_error_mm: float = 0.005
+    safety_margin_mm: float = 0.005
+    entry_air_gap_mm: float = 0.5
+    feed_mm_min: float = field(kw_only=True)
+    plunge_mm_min: float = field(kw_only=True)
+    tolerance_mm: float = 1e-5
+    spindle_rpm: float = field(kw_only=True)
+    work_offset: int = 1
+    tool_number: int = field(kw_only=True)
+    length_register: int = field(kw_only=True)
+    coolant: str = field(kw_only=True)
+    slope_from_deg: float = 0
+    slope_to_deg: float = 80
+    rest_threshold_mm: float | None = None
+    retract_z_mm: float | None = None
+    feed_z_mm: float | None = None
+    mode: str = "contact"
+
+    def __post_init__(self):
+        _geodesic_seed(self.seed)
+        if self.mode not in ("contact", "tool_centre"):
+            raise ValueError('Geodesic mode must be "contact" or "tool_centre"')
+
+    def to_dict(self):
+        result = _pattern_dict(self, "geodesic", ())
+        result.pop("seed")
+        result.pop("mode")
+        result["pattern"]["seed"] = _geodesic_seed(self.seed)
+        if self.mode == "tool_centre":
+            result["pattern"]["tool_centre"] = True
+        return result
+
+
+def _geodesic_seed(seed):
+    if seed == "boundary":
+        return {"kind": "boundary"}
+    if isinstance(seed, tuple) and len(seed) == 2 and seed[0] == "point" and len(seed[1]) == 2:
+        x, y = seed[1]
+        return {"kind": "point", "xy_mm": [float(x), float(y)]}
+    if (
+        isinstance(seed, tuple)
+        and len(seed) == 2
+        and seed[0] == "curve"
+        and len(seed[1]) >= 2
+        and all(len(p) == 2 for p in seed[1])
+    ):
+        return {"kind": "curve", "points_mm": [[float(x), float(y)] for x, y in seed[1]]}
+    raise ValueError(
+        'Geodesic seed must be "boundary", ("point", (x, y)) or ("curve", ((x, y), ...)) with two or more points'
+    )
+
+
+@dataclass(frozen=True)
 class Pencil:
     """Ball-end pencil finishing: follows the concave creases (inside corners
     and valleys) where the ball touches two faces at once, found where the
