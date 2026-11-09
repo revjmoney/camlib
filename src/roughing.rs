@@ -1142,115 +1142,152 @@ impl RoughingPlan {
                 let shadow = target
                     .shadow_simplified(z, op.bottom_allowance_mm, r, contour, &mut work, &cancel)
                     .map_err(|e| format!("roughing shadow at Z{z}: {e}"))?;
-                let region = expanded
-                    .boolean(&shadow.region.prepare(options)?, Boolean::Difference)?
-                    .region;
-                let layer_vertices = count_vertices(&region);
-                let step = match op.clearing {
-                    RoughingClearing::Raster { stepover_mm, .. }
-                    | RoughingClearing::Offset { stepover_mm, .. } => stepover_mm,
-                    RoughingClearing::Adaptive { .. } => r,
-                };
-                let pocket = PocketOperation {
-                    max_stay_down_mm: None,
-                    limits: op.limits.clone(),
-                    id: op.id.clone(),
-                    tool: op.tool.clone(),
-                    region,
-                    top_z_mm: material_spec.max_mm[2],
-                    floor_z_mm: z,
-                    stepdown_mm: material_spec.max_mm[2] - z,
-                    stepover_mm: step,
-                    feed_mm_min: op.feed_mm_min,
-                    plunge_mm_min: op.plunge_mm_min,
-                    clearance_z_mm: op.clearance_z_mm,
-                    radial_allowance_mm: op.radial_allowance_mm,
-                    bottom_allowance_mm: 0.,
-                    tolerance_mm: op.tolerance_mm,
-                    spindle_rpm: op.spindle_rpm,
-                    work_offset: op.work_offset,
-                    tool_number: op.tool_number,
-                    length_register: op.length_register,
-                    coolant: op.coolant,
-                    rest_tolerance_mm: op.rest_tolerance_mm,
-                    boundary_clockwise: Some(op.clockwise),
-                    entry: Some(op.entry.clone()),
-                    retract_z_mm: op.retract_z_mm,
-                    feed_z_mm: op.feed_z_mm,
-                };
-                let mut plan = match op.clearing {
-                    RoughingClearing::Offset {
-                        coverage_margin_mm, ..
-                    } => LayerPlan::Pocket(Box::new(PocketPlan::prepare_offset(
-                        pocket,
-                        tool,
-                        &material_spec,
-                        initial,
-                        1,
-                        coverage_margin_mm,
-                        &cancel,
-                    )?)),
-                    RoughingClearing::Raster { routing, .. } => {
-                        let p =
-                            PocketPlan::prepare(pocket, tool, &material_spec, initial, 1, &cancel)?;
-                        LayerPlan::Pocket(Box::new(if let Some(policy) = routing {
-                            p.with_routing(policy, &cancel)?
-                        } else {
-                            p
-                        }))
-                    }
-                    RoughingClearing::Adaptive {
-                        path_strategy,
-                        cutting_sense,
-                        orbit_radius_mm,
-                        min_orbit_radius_mm,
-                        local_orbit_tolerance_mm,
-                        boundary_tolerance_mm,
-                        ..
-                    } => LayerPlan::Adaptive(Box::new(AdaptivePlan::prepare(
-                        AdaptivePocketOperation {
+                let plan_layer = |shadow: RoughingShadow| -> Result<_, String> {
+                    let region = expanded
+                        .boolean(&shadow.region.prepare(options)?, Boolean::Difference)?
+                        .region;
+                    let layer_vertices = count_vertices(&region);
+                    let step = match op.clearing {
+                        RoughingClearing::Raster { stepover_mm, .. }
+                        | RoughingClearing::Offset { stepover_mm, .. } => stepover_mm,
+                        RoughingClearing::Adaptive { .. } => r,
+                    };
+                    let pocket = PocketOperation {
+                        max_stay_down_mm: None,
+                        limits: op.limits.clone(),
+                        id: op.id.clone(),
+                        tool: op.tool.clone(),
+                        region,
+                        top_z_mm: material_spec.max_mm[2],
+                        floor_z_mm: z,
+                        stepdown_mm: material_spec.max_mm[2] - z,
+                        stepover_mm: step,
+                        feed_mm_min: op.feed_mm_min,
+                        plunge_mm_min: op.plunge_mm_min,
+                        clearance_z_mm: op.clearance_z_mm,
+                        radial_allowance_mm: op.radial_allowance_mm,
+                        bottom_allowance_mm: 0.,
+                        tolerance_mm: op.tolerance_mm,
+                        spindle_rpm: op.spindle_rpm,
+                        work_offset: op.work_offset,
+                        tool_number: op.tool_number,
+                        length_register: op.length_register,
+                        coolant: op.coolant,
+                        rest_tolerance_mm: op.rest_tolerance_mm,
+                        boundary_clockwise: Some(op.clockwise),
+                        entry: Some(op.entry.clone()),
+                        retract_z_mm: op.retract_z_mm,
+                        feed_z_mm: op.feed_z_mm,
+                    };
+                    let mut plan = match op.clearing {
+                        RoughingClearing::Offset {
+                            coverage_margin_mm, ..
+                        } => LayerPlan::Pocket(Box::new(PocketPlan::prepare_offset(
                             pocket,
+                            tool,
+                            &material_spec,
+                            initial,
+                            1,
+                            coverage_margin_mm,
+                            &cancel,
+                        )?)),
+                        RoughingClearing::Raster { routing, .. } => {
+                            let p = PocketPlan::prepare(
+                                pocket,
+                                tool,
+                                &material_spec,
+                                initial,
+                                1,
+                                &cancel,
+                            )?;
+                            LayerPlan::Pocket(Box::new(if let Some(policy) = routing {
+                                p.with_routing(policy, &cancel)?
+                            } else {
+                                p
+                            }))
+                        }
+                        RoughingClearing::Adaptive {
                             path_strategy,
                             cutting_sense,
                             orbit_radius_mm,
                             min_orbit_radius_mm,
                             local_orbit_tolerance_mm,
                             boundary_tolerance_mm,
-                            max_engagement_deg: engagement.unwrap(),
-                            clockwise: op.clockwise,
-                        },
-                        tool,
-                        &material_spec,
-                        initial,
-                        1,
-                        &cancel,
-                    )?)),
-                };
-                if op.omit_empty_cuts {
-                    match &mut plan {
-                        LayerPlan::Pocket(p) => p.enable_empty_cuts(),
-                        LayerPlan::Adaptive(p) => p.enable_empty_cuts(),
+                            ..
+                        } => LayerPlan::Adaptive(Box::new(AdaptivePlan::prepare(
+                            AdaptivePocketOperation {
+                                pocket,
+                                path_strategy,
+                                cutting_sense,
+                                orbit_radius_mm,
+                                min_orbit_radius_mm,
+                                local_orbit_tolerance_mm,
+                                boundary_tolerance_mm,
+                                max_engagement_deg: engagement.unwrap(),
+                                clockwise: op.clockwise,
+                            },
+                            tool,
+                            &material_spec,
+                            initial,
+                            1,
+                            &cancel,
+                        )?)),
+                    };
+                    if op.omit_empty_cuts {
+                        match &mut plan {
+                            LayerPlan::Pocket(p) => p.enable_empty_cuts(),
+                            LayerPlan::Adaptive(p) => p.enable_empty_cuts(),
+                        }
                     }
-                }
-                let layer_error = plan.construction_error_mm();
-                if op
-                    .clearing_tolerance_mm
-                    .is_some_and(|budget| layer_error > budget)
-                {
-                    return Err(format!(
-                        "roughing clearing_tolerance_mm cannot enclose layer construction error {layer_error} at Z{z}"
-                    ));
-                }
-                let layer_guides = match &plan {
-                    LayerPlan::Pocket(p) => p.report().xy_strokes,
-                    LayerPlan::Adaptive(p) => {
-                        p.report().guide_strokes + p.report().navigation_links
+                    let layer_error = plan.construction_error_mm();
+                    if op
+                        .clearing_tolerance_mm
+                        .is_some_and(|budget| layer_error > budget)
+                    {
+                        return Err(format!(
+                            "roughing clearing_tolerance_mm cannot enclose layer construction error {layer_error} at Z{z}"
+                        ));
                     }
+                    let layer_guides = match &plan {
+                        LayerPlan::Pocket(p) => p.report().xy_strokes,
+                        LayerPlan::Adaptive(p) => {
+                            p.report().guide_strokes + p.report().navigation_links
+                        }
+                    };
+                    let report = RoughingLayerReport {
+                        tip_z_mm: z,
+                        shadow: shadow.report,
+                        clearing: plan.report(),
+                    };
+                    Ok((plan, report, layer_vertices, layer_guides, layer_error))
                 };
-                let report = RoughingLayerReport {
-                    tip_z_mm: z,
-                    shadow: shadow.report,
-                    clearing: plan.report(),
+                // The simplified shadow only grows the protected area, so it
+                // can narrow a gap the cutter still fits until no entry
+                // reaches it (#123): that layer keeps the exact shadow.
+                let simplified = shadow
+                    .report
+                    .simplified
+                    .as_ref()
+                    .is_some_and(|s| s.reason.is_none());
+                let (plan, report, layer_vertices, layer_guides, layer_error) = match plan_layer(
+                    shadow,
+                ) {
+                    Err(e) if simplified && e.contains(crate::entry::NO_ENTRY) => {
+                        let exact = target
+                            .shadow_simplified(z, op.bottom_allowance_mm, r, 0., &mut work, &cancel)
+                            .map_err(|e| format!("roughing shadow at Z{z}: {e}"))?;
+                        let exact_vertices = exact.report.output_vertices;
+                        let (plan, mut report, v, g, error) = plan_layer(exact)?;
+                        report.shadow.simplified = Some(SimplifiedShadow {
+                            tolerance_mm: contour,
+                            exact_vertices,
+                            reason: Some(format!(
+                                "kept the exact shadow: the simplified one left a region no entry reaches ({e})"
+                            )),
+                        });
+                        (plan, report, v, g, error)
+                    }
+                    result => result?,
                 };
                 Ok((
                     plan,

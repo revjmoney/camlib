@@ -229,6 +229,9 @@ pub(crate) struct EntryFitOptions {
     pub starting_work: usize,
     pub policy: EntryPolicy,
 }
+/// The start of `fit_entries`'s refusal when a component has no entry.
+pub(crate) const NO_ENTRY: &str = "no source-admitted entry/route";
+
 pub(crate) fn fit_entries(
     pocket: &PocketPlan,
     tours: &[Vec<Guide>],
@@ -361,7 +364,7 @@ pub(crate) fn fit_entries(
             }
         }
     }
-    let locations=chosen.into_iter().enumerate().map(|(i,c)|c.ok_or_else(||format!("no source-admitted entry/route for component {i}; choose a smaller radius or another entry strategy"))).collect::<Result<_,_>>()?;
+    let locations=chosen.into_iter().enumerate().map(|(i,c)|c.ok_or_else(||format!("{NO_ENTRY} for component {i}; choose a smaller radius or another entry strategy"))).collect::<Result<_,_>>()?;
     Ok(EntryFit { locations, work })
 }
 type RouteEdge = (usize, Stroke, f64, Option<usize>);

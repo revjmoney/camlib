@@ -3075,3 +3075,81 @@ fn simplified_shadows_contain_the_exact_one_with_few_vertices() {
             .is_none()
     );
 }
+
+/// A flat ring of `n` facets at Z8 around (16, 14): outer radius 8, inner
+/// `inner`. Its shadow is an annulus whose hole the cutter may just fit in.
+fn fine_ring(inner: f64, n: usize) -> Vec<[[f64; 3]; 3]> {
+    let at = |r: f64, t: f64| [16. + r * t.cos(), 14. + r * t.sin(), 8.];
+    (0..n)
+        .flat_map(|k| {
+            let (a, b) = (TAU * k as f64 / n as f64, TAU * (k + 1) as f64 / n as f64);
+            [
+                [at(inner, a), at(8., a), at(8., b)],
+                [at(inner, a), at(8., b), at(inner, b)],
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn a_gap_the_simplified_shadow_narrows_past_every_entry_keeps_the_exact_shadow() {
+    // #123: the hole leaves the 2 mm cutter ~0.2 mm of play with the exact
+    // shadow, room for a helical entry; the simplified shadow (grown by up to
+    // twice 0.075 mm) leaves less than the smallest helix, while the cutter
+    // still fits. The enclosed hole has no stock-edge entry, so the layer
+    // must keep the exact shadow instead of refusing the operation.
+    let cancel = AtomicBool::new(false);
+    let mut m = fixture(false);
+    let Operation::Roughing(op) = &mut m.operations[0] else {
+        panic!("fixture")
+    };
+    op.target = mesh(fine_ring(1.5, 2048), 0.);
+    op.radial_allowance_mm = 0.3;
+    op.floor_z_mm = 6.;
+    m.validate().unwrap();
+    let prepare = |contour: Option<f64>| {
+        let mut op = m.operations[0].clone();
+        if let Operation::Roughing(op) = &mut op {
+            op.contour_tolerance_mm = contour;
+        }
+        OperationPlan::prepare(
+            op,
+            &m.tools[0],
+            m.stock.height().unwrap(),
+            m.initial_position_mm,
+            1,
+            &cancel,
+        )
+    };
+    // The exact shadow plans: the hole is cleared through a helical entry.
+    let exact = serde_json::to_value(prepare(Some(0.)).unwrap().report()).unwrap();
+    let layers = exact["layers"].as_array().unwrap();
+    assert!(!layers.is_empty());
+    for layer in layers {
+        assert!(layer["shadow"]["simplified"].is_null(), "{layer}");
+    }
+    // By default every layer is simplified, finds no entry for the hole and
+    // falls back to the exact shadow, with the reason reported.
+    let plan = prepare(None).unwrap();
+    let report = serde_json::to_value(plan.report()).unwrap();
+    let layers = report["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), exact["layers"].as_array().unwrap().len());
+    for layer in layers {
+        let simplified = &layer["shadow"]["simplified"];
+        assert_eq!(simplified["tolerance_mm"], 0.075, "{layer}");
+        let reason = simplified["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("no entry reaches") && reason.contains("no source-admitted entry"),
+            "{reason}"
+        );
+        assert_eq!(
+            simplified["exact_vertices"], layer["shadow"]["output_vertices"],
+            "{layer}"
+        );
+    }
+    // ... and otherwise plans exactly as with the exact shadow.
+    for (layer, exact) in layers.iter().zip(exact["layers"].as_array().unwrap()) {
+        assert_eq!(layer["clearing"], exact["clearing"]);
+        assert_eq!(layer["tip_z_mm"], exact["tip_z_mm"]);
+    }
+}
